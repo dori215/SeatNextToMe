@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import String, Text, Date, DateTime
+from sqlalchemy import String, Text, Date, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import Base
@@ -31,3 +31,15 @@ class Event(Base):
     starts_at: Mapped[datetime] = mapped_column(DateTime)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
+class EventInterest(Base):
+    """Un rand = 'userul X e interesat de evenimentul Y'."""
+    __tablename__ = "event_interest"
+    __table_args__ = (UniqueConstraint("user_id", "event_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
+    looking_for_company: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

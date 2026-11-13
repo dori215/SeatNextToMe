@@ -85,3 +85,105 @@ def get_event(event_id: int, db: Session = Depends(get_db)):
     if event is None:
         raise HTTPException(status_code=404, detail="Evenimentul nu exista")
     return event
+
+# ---------- INTERESE + MATCHING ----------
+
+AGE_RANGE = 3  # diferenta maxima de varsta (in ani) la matching
+
+
+@app.post("/events/{event_id}/interest", response_model=schemas.InterestOut)
+def set_interest(
+    event_id: int,
+    data: schemas.InterestIn,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if db.get(models.Event, event_id) is None:
+        raise HTTPException(status_code=404, detail="Evenimentul nu exista")
+
+    interest = (
+        db.query(models.EventInterest)
+        .filter_by(user_id=current_user.id, event_id=event_id)
+        .first()
+    )
+
+    if interest is None:
+        interest = models.EventInterest(
+            user_id=current_user.id,
+            event_id=event_id,
+            looking_for_company=data.looking_for_company,
+        )
+        db.add(interest)
+    else:
+        interest.looking_for_company = data.looking_for_company
+
+    db.commit()
+    db.refresh(interest)
+    return interest
+
+
+@app.delete("/events/{event_id}/interest", status_code=204)
+def remove_interest(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    interest = (
+        db.query(models.EventInterest)
+        .filter_by(user_id=current_user.id, event_id=event_id)
+        .first()
+    )
+    if interest is not None:
+        db.delete(interest)
+        db.commit()
+
+
+@app.get("/events/{event_id}/matches", response_model=list[schemas.PublicUser])
+def event_matches(
+    event_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if db.get(models.Event, event_id) is None:
+        raise HTTPException(status_code=404, detail="Evenimentul nu exista")
+
+    # Vezi matches doar daca te-ai expus si tu
+    mine = (
+        db.query(models.EventInterest)
+        .filter_by(user_id=current_user.id, event_id=event_id)
+        .first()
+    )
+    if mine is None or not mine.looking_for_company:
+        raise HTTPException(
+            status_code=400,
+            detail="Marcheaza mai intai ca esti interesat si cauti companie",
+        )
+
+    my_age = calculate_age(current_user.birth_date)
+
+    candidates = (
+        db.query(models.User)
+        .join(models.EventInterest, models.EventInterest.user_id == models.User.id)
+        .filter(
+            models.EventInterest.event_id == event_id,
+            models.EventInterest.looking_for_company.is_(True),
+            models.User.id != current_user.id,
+        )
+        .all()
+    )
+
+    matches = []
+    for u in candidates:
+        age = calculate_age(u.birth_date)
+        if abs(age - my_age) <= AGE_RANGE:
+            matches.append(
+                schemas.PublicUser(
+                    id=u.id,
+                    name=u.name,
+                    age=age,
+                    bio=u.bio,
+                    avatar_url=u.avatar_url,
+                    verified=u.verified,
+                )
+            )
+    return matches
