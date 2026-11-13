@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+from fastapi.middleware.cors import CORSMiddleware
 
 from database import Base, engine, get_db
 from security import (
@@ -17,6 +18,18 @@ import schemas
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Tandem API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",   # Vite
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",   # alte setup-uri React
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 MIN_AGE = 18
 
