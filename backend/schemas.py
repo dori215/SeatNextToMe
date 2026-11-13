@@ -61,3 +61,23 @@ class PublicUser(BaseModel):
     bio: str | None = None
     avatar_url: str | None = None
     verified: bool
+
+class PublicUserOut(BaseModel):
+    id: int
+    name: str
+    age: int
+    bio: str | None = None
+    avatar_url: str | None = None
+    verified: bool
+
+
+class ConnectionCreate(BaseModel):
+    addressee_id: int
+    event_id: int | None = None   # opțional: la ce eveniment s-au găsit
+
+
+class ConnectionOut(BaseModel):
+    id: int
+    status: str
+    event_id: int | None = None
+    user: PublicUserOut           # "celălalt" user, din perspectiva celui care întreabă

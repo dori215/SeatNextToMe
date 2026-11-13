@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import or_, and_
 
 from database import Base, engine, get_db
 from security import (
@@ -25,6 +26,8 @@ app.add_middleware(
         "http://localhost:5173",   # Vite
         "http://127.0.0.1:5173",
         "http://localhost:3000",   # alte setup-uri React
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -33,6 +36,40 @@ app.add_middleware(
 
 MIN_AGE = 18
 
+def to_public_user(user: models.User) -> dict:
+    # Expunem DOAR ce e sigur: fără email, fără data nașterii
+    return {
+        "id": user.id,
+        "name": user.name,
+        "age": calculate_age(user.birth_date),
+        "bio": user.bio,
+        "avatar_url": user.avatar_url,
+        "verified": user.verified,
+    }
+
+
+def to_connection_out(conn: models.Connection, me: models.User, db: Session) -> dict:
+    # Aflăm cine e "celălalt" din conexiune
+    other_id = conn.addressee_id if conn.requester_id == me.id else conn.requester_id
+    other = db.get(models.User, other_id)
+    return {
+        "id": conn.id,
+        "status": conn.status,
+        "event_id": conn.event_id,
+        "user": to_public_user(other),
+    }
+
+
+def find_connection(db: Session, user_a: int, user_b: int):
+    # Caută o conexiune între doi useri, în orice direcție
+    return db.query(models.Connection).filter(
+        or_(
+            and_(models.Connection.requester_id == user_a,
+                 models.Connection.addressee_id == user_b),
+            and_(models.Connection.requester_id == user_b,
+                 models.Connection.addressee_id == user_a),
+        )
+    ).first()
 
 @app.get("/")
 def home():
@@ -200,3 +237,105 @@ def event_matches(
                 )
             )
     return matches
+
+@app.post("/connections", response_model=schemas.ConnectionOut, status_code=201)
+def send_connection_request(
+    data: schemas.ConnectionCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if data.addressee_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Nu îți poți trimite cerere singur")
+
+    other = db.get(models.User, data.addressee_id)
+    if other is None:
+        raise HTTPException(status_code=404, detail="Userul nu există")
+
+    # Regula de siguranță: doar persoane cu vârstă compatibilă
+    diff = abs(calculate_age(current_user.birth_date) - calculate_age(other.birth_date))
+    if diff > AGE_RANGE:
+        raise HTTPException(status_code=403, detail="Diferența de vârstă este prea mare")
+
+    existing = find_connection(db, current_user.id, other.id)
+    if existing:
+        # Celălalt ne-a trimis deja o cerere -> amândoi vor, acceptăm automat
+        if existing.status == "pending" and existing.requester_id == other.id:
+            existing.status = "accepted"
+            db.commit()
+            db.refresh(existing)
+            return to_connection_out(existing, current_user, db)
+        raise HTTPException(status_code=400, detail="Există deja o conexiune sau o cerere între voi")
+
+    conn = models.Connection(
+        requester_id=current_user.id,
+        addressee_id=other.id,
+        event_id=data.event_id,
+        status="pending",
+    )
+    db.add(conn)
+    db.commit()
+    db.refresh(conn)
+    return to_connection_out(conn, current_user, db)
+
+
+@app.get("/connections/requests", response_model=list[schemas.ConnectionOut])
+def incoming_requests(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Cererile primite, încă neacceptate."""
+    conns = db.query(models.Connection).filter(
+        models.Connection.addressee_id == current_user.id,
+        models.Connection.status == "pending",
+    ).all()
+    return [to_connection_out(c, current_user, db) for c in conns]
+
+
+@app.get("/connections", response_model=list[schemas.ConnectionOut])
+def my_connections(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Conexiunile acceptate (prietenii mei)."""
+    conns = db.query(models.Connection).filter(
+        or_(models.Connection.requester_id == current_user.id,
+            models.Connection.addressee_id == current_user.id),
+        models.Connection.status == "accepted",
+    ).all()
+    return [to_connection_out(c, current_user, db) for c in conns]
+
+
+def get_pending_request_for_me(db: Session, connection_id: int, me: models.User) -> models.Connection:
+    conn = db.get(models.Connection, connection_id)
+    # Doar destinatarul poate accepta/refuza, și doar cât timp e pending
+    if conn is None or conn.addressee_id != me.id:
+        raise HTTPException(status_code=404, detail="Cererea nu există")
+    if conn.status != "pending":
+        raise HTTPException(status_code=400, detail="Cererea a fost deja procesată")
+    return conn
+
+
+@app.post("/connections/{connection_id}/accept", response_model=schemas.ConnectionOut)
+def accept_connection(
+    connection_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    conn = get_pending_request_for_me(db, connection_id, current_user)
+    conn.status = "accepted"
+    db.commit()
+    db.refresh(conn)
+    return to_connection_out(conn, current_user, db)
+
+
+@app.post("/connections/{connection_id}/decline", response_model=schemas.ConnectionOut)
+def decline_connection(
+    connection_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    conn = get_pending_request_for_me(db, connection_id, current_user)
+    conn.status = "declined"
+    db.commit()
+    db.refresh(conn)
+    return to_connection_out(conn, current_user, db)

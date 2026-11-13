@@ -43,3 +43,19 @@ class EventInterest(Base):
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id"))
     looking_for_company: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class Connection(Base):
+    __tablename__ = "connections"
+    # Aceeași pereche (requester -> addressee) nu poate apărea de două ori
+    __table_args__ = (
+        UniqueConstraint("requester_id", "addressee_id", name="uq_connection_pair"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    requester_id: Mapped[int] = mapped_column(ForeignKey("users.id"))   # cine a trimis cererea
+    addressee_id: Mapped[int] = mapped_column(ForeignKey("users.id"))   # cine o primește
+    event_id: Mapped[int | None] = mapped_column(ForeignKey("events.id"), nullable=True)  # la ce eveniment s-au găsit
+    status: Mapped[str] = mapped_column(String, default="pending")      # pending / accepted / declined
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
