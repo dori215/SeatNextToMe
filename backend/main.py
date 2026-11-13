@@ -4,6 +4,11 @@ from sqlalchemy.orm import Session
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import or_, and_
 
+from fastapi import WebSocket, WebSocketDisconnect, Query
+from database import SessionLocal
+from security import get_user_from_token
+from ws_manager import manager
+
 from database import Base, engine, get_db
 from security import (
     hash_password,
@@ -71,6 +76,27 @@ def find_connection(db: Session, user_a: int, user_b: int):
         )
     ).first()
 
+def create_chat_for_connection(db: Session, conn: models.Connection) -> models.Chat:
+    existing = db.query(models.Chat).filter(models.Chat.connection_id == conn.id).first()
+    if existing:
+        return existing
+
+    chat = models.Chat(connection_id=conn.id, event_id=conn.event_id)
+    db.add(chat)
+    db.flush()   # trimite INSERT-ul ca să primim chat.id, dar fără commit încă
+
+    db.add_all([
+        models.ChatMember(chat_id=chat.id, user_id=conn.requester_id),
+        models.ChatMember(chat_id=chat.id, user_id=conn.addressee_id),
+    ])
+    db.commit()
+    return chat
+
+def is_chat_member(db: Session, chat_id: int, user_id: int) -> bool:
+    return db.query(models.ChatMember).filter(
+        models.ChatMember.chat_id == chat_id,
+        models.ChatMember.user_id == user_id,
+    ).first() is not None
 @app.get("/")
 def home():
     return {"message": "Merge backend-ul!"}
@@ -263,6 +289,7 @@ def send_connection_request(
             existing.status = "accepted"
             db.commit()
             db.refresh(existing)
+            create_chat_for_connection(db, existing)
             return to_connection_out(existing, current_user, db)
         raise HTTPException(status_code=400, detail="Există deja o conexiune sau o cerere între voi")
 
@@ -325,6 +352,7 @@ def accept_connection(
     conn.status = "accepted"
     db.commit()
     db.refresh(conn)
+    create_chat_for_connection(db, conn)
     return to_connection_out(conn, current_user, db)
 
 
@@ -339,3 +367,118 @@ def decline_connection(
     db.commit()
     db.refresh(conn)
     return to_connection_out(conn, current_user, db)
+
+@app.websocket("/ws/chat/{chat_id}")
+async def chat_websocket(websocket: WebSocket, chat_id: int, token: str = Query(...)):
+    # 1. Autentificare și verificare că userul e membru (sesiune DB scurtă)
+    with SessionLocal() as db:
+        user = get_user_from_token(token, db)
+        if user is None or not is_chat_member(db, chat_id, user.id):
+            await websocket.close(code=1008)   # 1008 = "policy violation"
+            return
+        user_id = user.id
+
+    # 2. Intrăm în cameră
+    await manager.connect(chat_id, websocket)
+
+    try:
+        while True:
+            text = (await websocket.receive_text()).strip()   # așteptăm un mesaj
+            if not text or len(text) > 1000:
+                continue                                       # ignorăm mesajele goale/prea lungi
+
+            # 3. Salvăm în baza de date (sesiune scurtă, nu ținem una deschisă tot chatul)
+            with SessionLocal() as db:
+                msg = models.Message(chat_id=chat_id, sender_id=user_id, content=text)
+                db.add(msg)
+                db.commit()
+                db.refresh(msg)
+                payload = {
+                    "id": msg.id,
+                    "chat_id": chat_id,
+                    "sender_id": user_id,
+                    "content": msg.content,
+                    "created_at": msg.created_at.isoformat(),
+                }
+
+            # 4. Trimitem tuturor din cameră (inclusiv expeditorului, ca să vadă confirmarea)
+            await manager.broadcast(chat_id, payload)
+
+    except WebSocketDisconnect:
+        manager.disconnect(chat_id, websocket)
+
+
+@app.get("/chats", response_model=list[schemas.ChatOut])
+def my_chats(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    memberships = db.query(models.ChatMember).filter(
+        models.ChatMember.user_id == current_user.id
+    ).all()
+
+    result = []
+    for m in memberships:
+        chat = db.get(models.Chat, m.chat_id)
+        # Celălalt membru al chatului 1:1
+        other_member = db.query(models.ChatMember).filter(
+            models.ChatMember.chat_id == chat.id,
+            models.ChatMember.user_id != current_user.id,
+        ).first()
+        other = db.get(models.User, other_member.user_id)
+        last = db.query(models.Message).filter(
+            models.Message.chat_id == chat.id
+        ).order_by(models.Message.id.desc()).first()
+
+        result.append({
+            "id": chat.id,
+            "event_id": chat.event_id,
+            "other_user": to_public_user(other),
+            "last_message": last,
+        })
+    return result
+
+
+@app.get("/chats/{chat_id}/messages", response_model=list[schemas.MessageOut])
+def chat_history(
+    chat_id: int,
+    limit: int = Query(50, ge=1, le=200),
+    before_id: int | None = None,      # pentru "încarcă mai vechi"
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if not is_chat_member(db, chat_id, current_user.id):
+        raise HTTPException(status_code=404, detail="Chatul nu există")
+
+    q = db.query(models.Message).filter(models.Message.chat_id == chat_id)
+    if before_id is not None:
+        q = q.filter(models.Message.id < before_id)
+
+    messages = q.order_by(models.Message.id.desc()).limit(limit).all()
+    return list(reversed(messages))   # le returnăm de la cel mai vechi la cel mai nou
+
+
+@app.post("/chats/{chat_id}/messages", response_model=schemas.MessageOut, status_code=201)
+async def send_message_http(
+    chat_id: int,
+    data: schemas.MessageCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if not is_chat_member(db, chat_id, current_user.id):
+        raise HTTPException(status_code=404, detail="Chatul nu există")
+
+    msg = models.Message(chat_id=chat_id, sender_id=current_user.id, content=data.content.strip())
+    db.add(msg)
+    db.commit()
+    db.refresh(msg)
+
+    # Îi anunțăm și pe cei conectați prin WebSocket
+    await manager.broadcast(chat_id, {
+        "id": msg.id,
+        "chat_id": chat_id,
+        "sender_id": msg.sender_id,
+        "content": msg.content,
+        "created_at": msg.created_at.isoformat(),
+    })
+    return msg

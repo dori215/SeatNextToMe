@@ -81,3 +81,23 @@ class ConnectionOut(BaseModel):
     status: str
     event_id: int | None = None
     user: PublicUserOut           # "celălalt" user, din perspectiva celui care întreabă
+
+class MessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=1000)
+
+
+class MessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)  # permite citirea direct din obiecte SQLAlchemy
+
+    id: int
+    chat_id: int
+    sender_id: int
+    content: str
+    created_at: datetime
+
+
+class ChatOut(BaseModel):
+    id: int
+    event_id: int | None = None
+    other_user: PublicUserOut
+    last_message: MessageOut | None = None

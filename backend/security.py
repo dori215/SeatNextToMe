@@ -52,3 +52,19 @@ def get_current_user(
     if user is None:
         raise error
     return user
+
+def get_user_from_token(token: str, db: Session):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.PyJWTError:
+        return None                      # token invalid sau expirat
+
+    sub = payload.get("sub")
+    if sub is None:
+        return None
+
+    # La tine "sub" poate fi id-ul sau emailul; acoperim ambele cazuri.
+    # (Uită-te în get_current_user ca să vezi ce pui tu în token.)
+    if str(sub).isdigit():
+        return db.get(models.User, int(sub))
+    return db.query(models.User).filter(models.User.email == sub).first()

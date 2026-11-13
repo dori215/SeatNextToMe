@@ -1,5 +1,4 @@
-from datetime import date, datetime
-
+from datetime import date, datetime, timezone
 from sqlalchemy import String, Text, Date, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,6 +55,40 @@ class Connection(Base):
     addressee_id: Mapped[int] = mapped_column(ForeignKey("users.id"))   # cine o primește
     event_id: Mapped[int | None] = mapped_column(ForeignKey("events.id"), nullable=True)  # la ce eveniment s-au găsit
     status: Mapped[str] = mapped_column(String, default="pending")      # pending / accepted / declined
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+class Chat(Base):
+    __tablename__ = "chats"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # Legătura cu conexiunea (unică => un singur chat per conexiune)
+    connection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("connections.id"), unique=True, nullable=True
+    )
+    event_id: Mapped[int | None] = mapped_column(ForeignKey("events.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class ChatMember(Base):
+    __tablename__ = "chat_members"
+    __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_chat_member"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id"), index=True)
+    sender_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
